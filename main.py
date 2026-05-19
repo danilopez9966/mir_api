@@ -537,3 +537,61 @@ def resolve_clarification(data: ClarificationRequest):
             status_code=500,
             detail=f"Error interno en /resolve-clarification: {str(e)}"
         )
+        
+@app.get("/status")
+def get_robot_status():
+
+    response = requests.get(
+        f"{MIR_BASE_URL}/status",
+        headers=mir_headers()
+    )
+
+    # Si MiR devuelve error
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text
+        )
+
+    # Datos del robot
+    data = response.json()
+
+    try:
+
+        # Variables de entorno
+        supabase_url = os.getenv("VITE_SUPABASE_URL")
+        supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
+
+        # Headers Supabase
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
+        }
+
+        # Payload para la tabla public.data
+        payload = {
+            "battery": data.get("battery_percentage"),
+            "mission_text": data.get("mission_text"),
+            "state": data.get("state_text"),
+            "velocity_linear": data.get("velocity", {}).get("linear"),
+            "velocity_angular": data.get("velocity", {}).get("angular")
+        }
+
+        # Insert en Supabase
+        insert_response = requests.post(
+            f"{supabase_url}/rest/v1/data",
+            headers=headers,
+            json=payload
+        )
+
+        # Logs para debug
+        print("SUPABASE STATUS:", insert_response.status_code)
+        print("SUPABASE RESPONSE:", insert_response.text)
+
+    except Exception as e:
+        print("Error guardando estado del robot:", e)
+
+    # Devuelve el estado del robot igualmente
+    return data
