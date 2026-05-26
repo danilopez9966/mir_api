@@ -128,7 +128,7 @@ def esperar():
 
     return robot_response.json()
 
-def enviar_a_recepcion():
+def enviar_a_recepcion(order_id):
     response = requests.get(
         f"{SUPABASE_URL}/rest/v1/missions?goal=eq.recepcion&select=guid",
         headers=supabase_headers()
@@ -161,6 +161,15 @@ def enviar_a_recepcion():
         raise HTTPException(
             status_code=robot_response.status_code,
             detail=robot_response.text
+        )
+    
+    robot_data = robot_response.json()
+    
+    mission_queue_id = robot_data.get("id")
+        
+    save_mission_history(
+            mission_queue_id=mission_queue_id,
+            order_id=order_id
         )
 
     return {
@@ -304,7 +313,7 @@ def send_multiple_products(data: ProductsRequest):
 
         esperar();
     
-    recepcion_result = enviar_a_recepcion()
+    recepcion_result = enviar_a_recepcion(data.order_id)
 
     return {
     "message": "Productos enviados y misión de recepción añadida",
@@ -576,57 +585,13 @@ def resolve_clarification(data: ClarificationRequest):
         )
 from datetime import datetime, timezone
 
-def update_mission_history(mission_queue_id, state_text):
-    supabase_url = os.getenv("VITE_SUPABASE_URL")
-    supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-    payload = None
-
-    if state_text in ["Executing", "Moving", "Running"]:
-        payload = {
-            "state": "executing",
-            "started_at": now
-        }
-
-    elif state_text in ["Done", "Completed"]:
-        payload = {
-            "state": "complete",
-            "completed_at": now
-        }
-
-    elif state_text in ["Aborted", "Error"]:
-        payload = {
-            "state": "aborted",
-            "completed_at": now
-        }
-
-    if payload is None:
-        return
-
-    response = requests.patch(
-        f"{supabase_url}/rest/v1/mission_histories?mission_queue_id=eq.{mission_queue_id}",
-        headers=headers,
-        json=payload
-    )
-
-    print("UPDATE MISSION HISTORY:", response.status_code, response.text)
-
-from datetime import datetime, timezone
-
 def now_utc():
     return datetime.now(timezone.utc).isoformat()
 
+def sync_mission_by_queue_id(current_mission_queue_id):
+    if not current_mission_queue_id:
+        return
 
-def sync_current_mission(current_mission_queue_id):
     supabase_url = os.getenv("VITE_SUPABASE_URL")
     supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
 
@@ -637,12 +602,10 @@ def sync_current_mission(current_mission_queue_id):
         "Prefer": "return=representation"
     }
 
-    if not current_mission_queue_id:
-        return
-
     current_mission_queue_id = int(current_mission_queue_id)
+    current_time = now_utc()
 
-    # 1. Buscar la misión que está actualmente en executing
+    # 1. Buscar misión ejecutándose actualmente
     executing_response = requests.get(
         f"{supabase_url}/rest/v1/mission_histories"
         f"?state=eq.executing"
@@ -656,22 +619,23 @@ def sync_current_mission(current_mission_queue_id):
 
     executing_missions = executing_response.json()
 
-    # 2. Si hay una executing y es distinta a la actual, completar SOLO esa
+    # 2. Si hay una executing distinta, cerrar la anterior
     if executing_missions:
         executing = executing_missions[0]
+        executing_queue_id = int(executing["mission_queue_id"])
 
-        if int(executing["mission_queue_id"]) != current_mission_queue_id:
+        if executing_queue_id != current_mission_queue_id:
             requests.patch(
                 f"{supabase_url}/rest/v1/mission_histories?id=eq.{executing['id']}",
                 headers=headers,
                 json={
                     "state": "complete",
-                    "completed_at": now_utc()
+                    "completed_at": current_time
                 },
                 timeout=10
             )
 
-    # 3. Marcar la misión actual como executing SOLO si está pending
+    # 3. Marcar la misión actual como executing si todavía está pending
     requests.patch(
         f"{supabase_url}/rest/v1/mission_histories"
         f"?mission_queue_id=eq.{current_mission_queue_id}"
@@ -679,127 +643,10 @@ def sync_current_mission(current_mission_queue_id):
         headers=headers,
         json={
             "state": "executing",
-            "started_at": now_utc()
+            "started_at": current_time
         },
         timeout=10
     )
-    supabase_url = os.getenv("VITE_SUPABASE_URL")
-    supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
-    now = datetime.now(timezone.utc).isoformat()
-
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-    # Buscar última misión en ejecución
-    running_response = requests.get(
-        f"{supabase_url}/rest/v1/mission_histories"
-        f"?state=eq.executing"
-        f"&completed_at=is.null"
-        f"&order=started_at.desc"
-        f"&limit=1"
-        f"&select=*",
-        headers=headers,
-        timeout=10
-    )
-
-    running_missions = running_response.json()
-
-    if running_missions:
-        running_mission = running_missions[0]
-        running_id = str(running_mission["mission_queue_id"])
-
-        # Si el robot ya está ejecutando otra misión, cerramos la anterior
-        if str(current_mission_queue_id) != running_id:
-            requests.patch(
-                f"{supabase_url}/rest/v1/mission_histories?id=eq.{running_mission['id']}",
-                headers=headers,
-                json={
-                    "state": "complete",
-                    "completed_at": now
-                },
-                timeout=10
-            )
-
-    # Marcar la misión actual como executing
-    if current_mission_queue_id:
-        requests.patch(
-            f"{supabase_url}/rest/v1/mission_histories"
-            f"?mission_queue_id=eq.{current_mission_queue_id}"
-            f"&state=eq.pending",
-            headers=headers,
-            json={
-                "state": "executing",
-                "started_at": now
-            },
-            timeout=10
-        )
-    supabase_url = os.getenv("VITE_SUPABASE_URL")
-    supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
-    now = datetime.now(timezone.utc).isoformat()
-
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-    # 1. Buscar SOLO la última misión executing sin completar
-    get_response = requests.get(
-        f"{supabase_url}/rest/v1/mission_histories"
-        f"?state=eq.executing"
-        f"&completed_at=is.null"
-        f"&order=started_at.desc"
-        f"&limit=1"
-        f"&select=*",
-        headers=headers
-    )
-
-    missions = get_response.json()
-
-    if not missions:
-        return
-
-    mission = missions[0]
-    mission_id = mission["id"]
-
-    # 2. Completar SOLO esa misión
-    patch_response = requests.patch(
-        f"{supabase_url}/rest/v1/mission_histories?id=eq.{mission_id}",
-        headers=headers,
-        json={
-            "state": "complete",
-            "completed_at": now
-        }
-    )
-
-    print("MISSION COMPLETED:", patch_response.status_code, patch_response.text)
-    supabase_url = os.getenv("VITE_SUPABASE_URL")
-    supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
-    now = datetime.now(timezone.utc).isoformat()
-
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-    response = requests.patch(
-        f"{supabase_url}/rest/v1/mission_histories"
-        f"?state=eq.executing&completed_at=is.null",
-        headers=headers,
-        json={
-            "state": "complete",
-            "completed_at": now
-        }
-    )
-
-    print("COMPLETE LAST EXECUTING:", response.status_code, response.text)
         
 @app.get("/status")
 def get_robot_status():
@@ -818,11 +665,9 @@ def get_robot_status():
 
     # Datos del robot
     data = response.json()
-    
-    current_mission_queue_id = data.get("mission_queue_id")
 
-    if current_mission_queue_id:
-        sync_current_mission(current_mission_queue_id)
+    current_mission_queue_id = data.get("mission_queue_id")
+    sync_mission_by_queue_id(current_mission_queue_id)
 
     try:
 
