@@ -1,24 +1,26 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 import requests
 import os
-import time
 
 load_dotenv()
 
 app = FastAPI(title="API REST Robot MiR + Supabase")
 
+
+# variables de entorno -----
 MIR_BASE_URL = os.getenv("MIR_BASE_URL")
 MIR_TOKEN = os.getenv("MIR_TOKEN")
-MIR_AUTH_PREFIX = os.getenv("MIR_AUTH_PREFIX", "Bearer")
 
 SUPABASE_URL = os.getenv("VITE_SUPABASE_URL")
 SUPABASE_KEY = os.getenv("VITE_SUPABASE_ANON_KEY")
 
+
+# modelos -----
 class MissionRequest(BaseModel):
     mission_id: str
-
 
 class ProductsRequest(BaseModel):
     products: list[str]
@@ -28,16 +30,18 @@ class ClarificationRequest(BaseModel):
     order_id: int
     message: str
 
-def mir_headers():
 
+# headers reutilizables -----
+def mir_headers():
+    # autenticar peticiones a la api del robot
     return {
         "Authorization": MIR_TOKEN,
         "Content-Type": "application/json",
         "Accept-Language": "en_US"
     }
 
-
 def supabase_headers():
+    # autenticar peticiones a supabase
     return {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -51,16 +55,17 @@ def home():
         "message": "API REST para controlar robot MiR con Supabase funcionando"
     }
 
-def save_mission_history(mission_queue_id, order_id=None):
-    supabase_url = os.getenv("VITE_SUPABASE_URL")
-    supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
 
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
+# utilidades -----
+
+# guarda en mission_histories las misiones en estado pending
+def save_mission_history(mission_queue_id, order_id=None):
+    # headers = {
+    #     "apikey": supabase_key,
+    #     "Authorization": f"Bearer {SUPABASE_KEY}",
+    #     "Content-Type": "application/json",
+    #     "Prefer": "return=representation"
+    # }
 
     payload = {
         "state": "pending",
@@ -69,8 +74,8 @@ def save_mission_history(mission_queue_id, order_id=None):
     }
 
     response = requests.post(
-        f"{supabase_url}/rest/v1/mission_histories",
-        headers=headers,
+        f"{SUPABASE_URL}/rest/v1/mission_histories",
+        headers=supabase_headers(),
         json=payload
     )
 
@@ -79,29 +84,7 @@ def save_mission_history(mission_queue_id, order_id=None):
 
     return response
 
-@app.post("/robot/send-mission")
-def send_mission(mission: MissionRequest):
-    body = {
-        "mission_id": mission.mission_id
-    }
-
-    response = requests.post(
-        f"{MIR_BASE_URL}/mission_queue",
-        json=body,
-        headers=mir_headers()
-    )
-
-    if response.status_code not in [200, 201]:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=response.text
-        )
-
-    return {
-        "message": "Misión enviada correctamente al robot",
-        "robot_response": response.json()
-    }
-
+# llama a la mision esperar, para simular carga de productos
 def esperar():
     response = requests.get(
         f"{SUPABASE_URL}/rest/v1/missions?goal=eq.espera&select=guid",
@@ -128,6 +111,7 @@ def esperar():
 
     return robot_response.json()
 
+# llama a la mision recepcion, para simular recogida de productos
 def enviar_a_recepcion(order_id):
     response = requests.get(
         f"{SUPABASE_URL}/rest/v1/missions?goal=eq.recepcion&select=guid",
@@ -175,8 +159,97 @@ def enviar_a_recepcion(order_id):
     return {
         "goal": "recepcion",
         "mission_guid": mission_guid,
-        "robot_response": robot_response.json()
+        "robot_response": robot_data
     }
+
+# devuelve timestamp actual
+def now_utc():
+    return datetime.now(timezone.utc).isoformat()
+
+# actualiza status de las misiones cuando empiezan o acaban
+def sync_mission_by_queue_id(current_mission_queue_id):
+    if not current_mission_queue_id:
+        return
+
+    # headers = {
+    #     "apikey": supabase_key,
+    #     "Authorization": f"Bearer {SUPABASE_KEY}",
+    #     "Content-Type": "application/json",
+    #     "Prefer": "return=representation"
+    # }
+
+    current_mission_queue_id = int(current_mission_queue_id)
+    current_time = now_utc()
+
+    # 1. Buscar misión ejecutándose actualmente
+    executing_response = requests.get(
+        f"{SUPABASE_URL}/rest/v1/mission_histories"
+        f"?state=eq.executing"
+        f"&completed_at=is.null"
+        f"&order=started_at.desc"
+        f"&limit=1"
+        f"&select=*",
+        headers=supabase_headers(),
+        timeout=10
+    )
+
+    executing_missions = executing_response.json()
+
+    # 2. Si hay una executing distinta, cerrar la anterior
+    if executing_missions:
+        executing = executing_missions[0]
+        executing_queue_id = int(executing["mission_queue_id"])
+
+        if executing_queue_id != current_mission_queue_id:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/mission_histories?id=eq.{executing['id']}",
+                headers=supabase_headers(),
+                json={
+                    "state": "complete",
+                    "completed_at": current_time
+                },
+                timeout=10
+            )
+
+    # 3. Marcar la misión actual como executing si todavía está pending
+    requests.patch(
+        f"{SUPABASE_URL}/rest/v1/mission_histories"
+        f"?mission_queue_id=eq.{current_mission_queue_id}"
+        f"&state=eq.pending",
+        headers=supabase_headers(),
+        json={
+            "state": "executing",
+            "started_at": current_time
+        },
+        timeout=10
+    )
+
+
+# endpoints -----
+
+@app.post("/robot/send-mission")
+def send_mission(mission: MissionRequest):
+    body = {
+        "mission_id": mission.mission_id
+    }
+
+    response = requests.post(
+        f"{MIR_BASE_URL}/mission_queue",
+        json=body,
+        headers=mir_headers()
+    )
+
+    if response.status_code not in [200, 201]:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=response.text
+        )
+
+    return {
+        "message": "Misión enviada correctamente al robot",
+        "robot_response": response.json()
+    }
+
 
 @app.get("/products")
 def get_products():
@@ -321,6 +394,7 @@ def send_multiple_products(data: ProductsRequest):
     "recepcion": recepcion_result
 }
 
+
 @app.post("/check-products")
 def check_products(data: ProductsRequest):
     try:
@@ -390,15 +464,15 @@ def check_products(data: ProductsRequest):
             options_text = "\n".join([
                 f"{option['number']}. {option['name']}"
                 for option in first_ambiguous["options"]
-         ])
+        ])
 
             return {
                     "status": "clarification_required",
                     "message": (
-                         f"He encontrado varios productos para '{first_ambiguous['requested']}'. "
+                        f"He encontrado varios productos para '{first_ambiguous['requested']}'. "
                         f"¿Cuál quieres?\n\n{options_text}"
                     ),
-                     "current_ambiguous": first_ambiguous,
+                    "current_ambiguous": first_ambiguous,
                     "valid_products": valid_products,
                     "ambiguous_products": ambiguous_products,
                     "missing_products": missing_products
@@ -524,10 +598,10 @@ def resolve_clarification(data: ClarificationRequest):
             }
         })
 
-        ambiguous_products = [
-            item for item in ambiguous_products
-            if item.get("requested") != resolved_ambiguous.get("requested")
-        ]
+        # ambiguous_products = [
+        #     item for item in ambiguous_products
+        #     if item.get("requested") != resolved_ambiguous.get("requested")
+        # ]
 
         if len(ambiguous_products) == 0 and len(missing_products) == 0:
             new_status = "ready_to_send"
@@ -583,71 +657,8 @@ def resolve_clarification(data: ClarificationRequest):
             status_code=500,
             detail=f"Error interno en /resolve-clarification: {str(e)}"
         )
-from datetime import datetime, timezone
 
-def now_utc():
-    return datetime.now(timezone.utc).isoformat()
-
-def sync_mission_by_queue_id(current_mission_queue_id):
-    if not current_mission_queue_id:
-        return
-
-    supabase_url = os.getenv("VITE_SUPABASE_URL")
-    supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
-
-    headers = {
-        "apikey": supabase_key,
-        "Authorization": f"Bearer {supabase_key}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-
-    current_mission_queue_id = int(current_mission_queue_id)
-    current_time = now_utc()
-
-    # 1. Buscar misión ejecutándose actualmente
-    executing_response = requests.get(
-        f"{supabase_url}/rest/v1/mission_histories"
-        f"?state=eq.executing"
-        f"&completed_at=is.null"
-        f"&order=started_at.desc"
-        f"&limit=1"
-        f"&select=*",
-        headers=headers,
-        timeout=10
-    )
-
-    executing_missions = executing_response.json()
-
-    # 2. Si hay una executing distinta, cerrar la anterior
-    if executing_missions:
-        executing = executing_missions[0]
-        executing_queue_id = int(executing["mission_queue_id"])
-
-        if executing_queue_id != current_mission_queue_id:
-            requests.patch(
-                f"{supabase_url}/rest/v1/mission_histories?id=eq.{executing['id']}",
-                headers=headers,
-                json={
-                    "state": "complete",
-                    "completed_at": current_time
-                },
-                timeout=10
-            )
-
-    # 3. Marcar la misión actual como executing si todavía está pending
-    requests.patch(
-        f"{supabase_url}/rest/v1/mission_histories"
-        f"?mission_queue_id=eq.{current_mission_queue_id}"
-        f"&state=eq.pending",
-        headers=headers,
-        json={
-            "state": "executing",
-            "started_at": current_time
-        },
-        timeout=10
-    )
-        
+# recoge status del robot y lo guarda en supabase
 @app.get("/status")
 def get_robot_status():
 
@@ -670,18 +681,13 @@ def get_robot_status():
     sync_mission_by_queue_id(current_mission_queue_id)
 
     try:
-
-        # Variables de entorno
-        supabase_url = os.getenv("VITE_SUPABASE_URL")
-        supabase_key = os.getenv("VITE_SUPABASE_ANON_KEY")
-
         # Headers Supabase
-        headers = {
-            "apikey": supabase_key,
-            "Authorization": f"Bearer {supabase_key}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation"
-        }
+        # headers = {
+        #     "apikey": supabase_key,
+        #     "Authorization": f"Bearer {SUPABASE_KEY}",
+        #     "Content-Type": "application/json",
+        #     "Prefer": "return=representation"
+        # }
 
         # Payload para la tabla public.data
         payload = {
@@ -694,17 +700,15 @@ def get_robot_status():
 
         # Insert en Supabase
         insert_response = requests.post(
-            f"{supabase_url}/rest/v1/data",
-            headers=headers,
+            f"{SUPABASE_URL}/rest/v1/data",
+            headers=supabase_headers(),
             json=payload
         )
 
-        # Logs para debug
         print("SUPABASE STATUS:", insert_response.status_code)
         print("SUPABASE RESPONSE:", insert_response.text)
 
     except Exception as e:
         print("Error guardando estado del robot:", e)
 
-    # Devuelve el estado del robot igualmente
     return data
