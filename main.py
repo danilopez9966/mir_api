@@ -60,12 +60,6 @@ def home():
 
 # guarda en mission_histories las misiones en estado pending
 def save_mission_history(mission_queue_id, order_id=None):
-    # headers = {
-    #     "apikey": supabase_key,
-    #     "Authorization": f"Bearer {SUPABASE_KEY}",
-    #     "Content-Type": "application/json",
-    #     "Prefer": "return=representation"
-    # }
 
     payload = {
         "state": "pending",
@@ -156,6 +150,8 @@ def enviar_a_recepcion(order_id):
             order_id=order_id
         )
 
+    esperar()
+    
     return {
         "goal": "recepcion",
         "mission_guid": mission_guid,
@@ -170,13 +166,6 @@ def now_utc():
 def sync_mission_by_queue_id(current_mission_queue_id):
     if not current_mission_queue_id:
         return
-
-    # headers = {
-    #     "apikey": supabase_key,
-    #     "Authorization": f"Bearer {SUPABASE_KEY}",
-    #     "Content-Type": "application/json",
-    #     "Prefer": "return=representation"
-    # }
 
     current_mission_queue_id = int(current_mission_queue_id)
     current_time = now_utc()
@@ -326,12 +315,22 @@ def get_missions_from_db():
 @app.post("/robot/send-products")
 def send_multiple_products(data: ProductsRequest):
     sent_missions = []
+    goals_to_visit = {}
 
+    # 1. Buscar productos y agruparlos por estantería/goal
     for product_name in data.products:
         product_response = requests.get(
             f"{SUPABASE_URL}/rest/v1/products?name=ilike.*{product_name}*&select=*",
             headers=supabase_headers()
         )
+
+        if product_response.status_code != 200:
+            sent_missions.append({
+                "product": product_name,
+                "status": "Error buscando producto",
+                "detail": product_response.text
+            })
+            continue
 
         products = product_response.json()
 
@@ -345,17 +344,36 @@ def send_multiple_products(data: ProductsRequest):
         selected_product = products[0]
         product_goal = selected_product["goal"]
 
+        if product_goal not in goals_to_visit:
+            goals_to_visit[product_goal] = {
+                "goal": product_goal,
+                "products": []
+            }
+
+        goals_to_visit[product_goal]["products"].append(selected_product)
+
+    # 2. Enviar una misión por cada estantería única
+    for goal, goal_data in goals_to_visit.items():
         mission_response = requests.get(
-            f"{SUPABASE_URL}/rest/v1/missions?goal=eq.{product_goal}&select=*",
+            f"{SUPABASE_URL}/rest/v1/missions?goal=eq.{goal}&select=*",
             headers=supabase_headers()
         )
+
+        if mission_response.status_code != 200:
+            sent_missions.append({
+                "goal": goal,
+                "products": [p["name"] for p in goal_data["products"]],
+                "status": "Error buscando misión",
+                "detail": mission_response.text
+            })
+            continue
 
         missions = mission_response.json()
 
         if not missions:
             sent_missions.append({
-                "product": product_name,
-                "goal": product_goal,
+                "goal": goal,
+                "products": [p["name"] for p in goal_data["products"]],
                 "status": "Misión no encontrada"
             })
             continue
@@ -367,9 +385,19 @@ def send_multiple_products(data: ProductsRequest):
             json={"mission_id": mission_guid},
             headers=mir_headers()
         )
-        
-        robot_data = robot_response.json()
 
+        if robot_response.status_code not in [200, 201]:
+            sent_missions.append({
+                "goal": goal,
+                "products": [p["name"] for p in goal_data["products"]],
+                "mission_guid": mission_guid,
+                "robot_status": robot_response.status_code,
+                "status": "Error enviando misión al robot",
+                "detail": robot_response.text
+            })
+            continue
+
+        robot_data = robot_response.json()
         mission_queue_id = robot_data.get("id")
 
         save_mission_history(
@@ -378,21 +406,26 @@ def send_multiple_products(data: ProductsRequest):
         )
 
         sent_missions.append({
-            "product": product_name,
-            "goal": product_goal,
+            "goal": goal,
+            "products": [p["name"] for p in goal_data["products"]],
             "mission_guid": mission_guid,
-            "robot_status": robot_response.status_code
+            "mission_queue_id": mission_queue_id,
+            "robot_status": robot_response.status_code,
+            "status": "Misión enviada correctamente"
         })
 
-        esperar();
-    
+        esperar()
+
+    # 3. Enviar a recepción al final
     recepcion_result = enviar_a_recepcion(data.order_id)
 
     return {
-    "message": "Productos enviados y misión de recepción añadida",
-    "results": sent_missions,
-    "recepcion": recepcion_result
-}
+        "message": "Productos agrupados por estantería, misiones enviadas y recepción añadida",
+        "order_id": data.order_id,
+        "visited_goals": list(goals_to_visit.keys()),
+        "results": sent_missions,
+        "recepcion": recepcion_result
+    }
 
 
 @app.post("/check-products")
@@ -681,13 +714,6 @@ def get_robot_status():
     sync_mission_by_queue_id(current_mission_queue_id)
 
     try:
-        # Headers Supabase
-        # headers = {
-        #     "apikey": supabase_key,
-        #     "Authorization": f"Bearer {SUPABASE_KEY}",
-        #     "Content-Type": "application/json",
-        #     "Prefer": "return=representation"
-        # }
 
         # Payload para la tabla public.data
         payload = {
