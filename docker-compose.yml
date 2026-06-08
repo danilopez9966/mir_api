@@ -1,19 +1,17 @@
 services:
   n8n:
     image: n8nio/n8n:latest
-    container_name: n8n
-    restart: unless-stopped
-
+    container_name: n8n_mir
     ports:
       - "5678:5678"
-
     environment:
-      - NODE_ENV=production
-      - GENERIC_TIMEZONE=Europe/Madrid
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - TZ=Europe/Madrid
-
+      - DB_TYPE=sqlite
+      - DB_SQLITE_DATABASE=/home/node/.n8n/database.sqlite
     volumes:
       - n8n_data:/home/node/.n8n
+    restart: unless-stopped
 
 volumes:
   n8n_data:

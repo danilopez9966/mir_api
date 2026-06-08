@@ -1,2 +1,6 @@
 .env
-n8n_data/database.sqlite
+n8n_data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.tar.gz
