@@ -66,6 +66,7 @@ docker compose up -d
 ```
 
 Accede a n8n en http://localhost:5678 y a la API en http://localhost:8000.
+Para clonar la base de datos ejecuta el script SQL (bd_mir250.sql)
 
 ```bash
 # Copiar el workflow  de n8n dentro del contenedor
@@ -75,8 +76,12 @@ docker cp .\workflows.json n8n_mir:/home/node/.n8n/workflows.json
 docker exec -it n8n_mir n8n import:workflow --input=/home/node/.n8n/workflows.json
 
 # Revisar credenciales y variables
-
+- Añadir API KEY de Gemini
+- Crendenciales Postgres y Supabase
+- Revisar llamada correcta a tablas y columnas de la bd
 ```
+
+Para ver los datos en tiempo real conecta tu bd a Grafana e importa el dashboard desde el JSON dashboard-grafana-mir250.json
 <br>
 
 ## 🗄️ Base de Datos
