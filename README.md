@@ -77,7 +77,7 @@ docker exec -it n8n_mir n8n import:workflow --input=/home/node/.n8n/workflows.js
 # Revisar credenciales y variables
 
 ```
-<br><br>
+<br>
 
 ## 🗄️ Base de Datos
 - **products** – Productos del almacén y su ubicación (estantería).
